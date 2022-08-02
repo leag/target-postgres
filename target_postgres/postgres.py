@@ -16,7 +16,9 @@ from psycopg2.extras import LoggingConnection, LoggingCursor
 from target_postgres import json_schema, singer
 from target_postgres.exceptions import PostgresError
 from target_postgres.sql_base import SEPARATOR, SQLInterface
+import os
 
+from target_postgres.gcs import persist_csv_to_gcs
 
 RESERVED_NULL_DEFAULT = 'NULL'
 
@@ -95,7 +97,7 @@ class MillisLoggingConnection(LoggingConnection):
 
 
 
-class TransformStream:
+class TransformStream(io.StringIO):
     def __init__(self, fun):
         self.fun = fun
 
@@ -130,6 +132,7 @@ class PostgresTarget(SQLInterface):
         except AttributeError:
             self.LOGGER.debug('PostgresTarget disabling logging all queries.')
 
+        self.config = kwargs.get("config", {})
         self.conn = connection
         self.postgres_schema = postgres_schema
         self.persist_empty_tables = persist_empty_tables
@@ -162,7 +165,7 @@ class PostgresTarget(SQLInterface):
             if raw_json:
                 try:
                     metadata = json.loads(raw_json)
-                except:
+                except Exception:
                     pass
 
             if metadata and metadata.get('schema_version', 0) == 0:
@@ -550,27 +553,32 @@ class PostgresTarget(SQLInterface):
                         dedupped_columns=dedupped_columns)
 
     def serialize_table_record_null_value(self, remote_schema, streamed_schema, field, value):
-        if value is None:
-            return RESERVED_NULL_DEFAULT
-        return value
+        return RESERVED_NULL_DEFAULT if value is None else value
 
     def serialize_table_record_datetime_value(self, remote_schema, streamed_schema, field, value):
         return _format_datetime(value)
 
-    def persist_csv_rows(self,
-                         cur,
-                         remote_schema,
-                         temp_table_name,
-                         columns,
-                         csv_rows):
-
+    def persist_csv_rows(self, cur, remote_schema, temp_table_name, columns, csv_rows):
+        #save csv rows to temp file
+        if self.config.get('persist_to_gcs'):
+            with open(f'/tmp/{temp_table_name}.csv', 'w') as temp_csv_file:
+                while True:
+                    row = csv_rows.read()
+                    temp_csv_file.write(row)
+                    if not row:
+                        break
+            file_handle = open(f'/tmp/{temp_table_name}.csv', 'r')
+        else:
+            file_handle = csv_rows
         copy = sql.SQL('COPY {}.{} ({}) FROM STDIN WITH CSV NULL AS {}').format(
             sql.Identifier(self.postgres_schema),
             sql.Identifier(temp_table_name),
             sql.SQL(', ').join(map(sql.Identifier, columns)),
             sql.Literal(RESERVED_NULL_DEFAULT))
-        cur.copy_expert(copy, csv_rows)
-
+        cur.copy_expert(copy, file_handle)
+        if self.config.get('persist_to_gcs'):
+            persist_csv_to_gcs(self.postgres_schema,remote_schema["name"], temp_table_name, columns, self.config)
+            os.remove(f'/tmp/{temp_table_name}.csv')
         pattern = re.compile(singer.LEVEL_FMT.format('[0-9]+'))
         subkeys = list(filter(lambda header: re.match(pattern, header) is not None, columns))
 
@@ -604,7 +612,6 @@ class PostgresTarget(SQLInterface):
         def transform():
             try:
                 row = next(rows_iter)
-
                 with io.StringIO() as out:
                     writer = csv.DictWriter(out, csv_headers)
                     writer.writerow(row)
@@ -615,12 +622,7 @@ class PostgresTarget(SQLInterface):
         csv_rows = TransformStream(transform)
 
         ## Persist csv rows
-        self.persist_csv_rows(cur,
-                              remote_schema,
-                              target_table_name,
-                              csv_headers,
-                              csv_rows)
-
+        self.persist_csv_rows(cur, remote_schema, target_table_name, csv_headers, csv_rows)
         return len(table_batch['records'])
 
     def add_column(self, cur, table_name, column_name, column_schema):
