@@ -597,7 +597,7 @@ class PostgresTarget(SQLInterface):
                 row = next(rows_iter)
 
                 with io.StringIO() as out:
-                    writer = csv.DictWriter(out, csv_headers)
+                    writer = csv.DictWriter(out, csv_headers, escapechar='\\')
                     writer.writerow(row)
                     return out.getvalue()
             except StopIteration:
