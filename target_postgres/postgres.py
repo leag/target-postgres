@@ -575,6 +575,16 @@ class PostgresTarget(SQLInterface):
                                           subkeys)
         cur.execute(update_sql)
 
+    def sanitize_row(self, row):
+        """Sanitize the row to remove or replace invalid UTF-8 sequences."""
+        sanitized_row = {}
+        for key, value in row.items():
+            if isinstance(value, str):
+                sanitized_row[key] = value.replace('\x00', '')  # Remove null bytes
+            else:
+                sanitized_row[key] = value
+        return sanitized_row
+
     def write_table_batch(self, cur, table_batch, metadata):
         remote_schema = table_batch['remote_schema']
 
@@ -595,6 +605,7 @@ class PostgresTarget(SQLInterface):
         def transform():
             try:
                 row = next(rows_iter)
+                row = self.sanitize_row(row)  # Sanitize the row before writing
 
                 with io.StringIO() as out:
                     writer = csv.DictWriter(out, csv_headers, escapechar='\\')
