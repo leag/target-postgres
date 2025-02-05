@@ -546,7 +546,10 @@ class PostgresTarget(SQLInterface):
         return value
 
     def serialize_table_record_datetime_value(self, remote_schema, streamed_schema, field, value):
-        return arrow.get(value).format('YYYY-MM-DD HH:mm:ss.SSSSZZ')
+        if isinstance(value, str):
+            return arrow.get(value.replace(' UTC', '')).format('YYYY-MM-DD HH:mm:ss.SSSSZZ')
+        else:
+            return arrow.get(value).format('YYYY-MM-DD HH:mm:ss.SSSSZZ')
 
     def persist_csv_rows(self,
                          cur,
